@@ -46,11 +46,44 @@ pub struct FlashBlock<T: ConfigTable> {
     pub data: T,
 }
 
+pub trait FlashBlockDyn {
+    fn build_bytestream_dyn(&self, data_sheet: &DataSheet) -> Result<Vec<u8>, NvmError>;
+}
+
+impl<T: ConfigTable> FlashBlockDyn for FlashBlock<T>
+where
+    T::Value: ConfigValue,
+{
+    fn build_bytestream_dyn(&self, data_sheet: &DataSheet) -> Result<Vec<u8>, NvmError> {
+        self.build_bytestream(data_sheet)
+    }
+}
+
 impl FlashBlock<toml::Table> {
     pub fn new(filename: &str, blockname: &str) -> Result<Self, NvmError> {
         let file_content = fs::read_to_string(filename)
             .map_err(|_| NvmError::FileError("failed to open file: ".to_string() + filename))?;
         let content: toml::Value = toml::from_str(&file_content)
+            .map_err(|_| NvmError::FileError("failed to parse file: ".to_string() + filename))?;
+        Self::from_parsed_content(content, blockname)
+    }
+}
+
+impl FlashBlock<serde_json::Map<String, serde_json::Value>> {
+    pub fn new(filename: &str, blockname: &str) -> Result<Self, NvmError> {
+        let file_content = fs::read_to_string(filename)
+            .map_err(|_| NvmError::FileError("failed to open file: ".to_string() + filename))?;
+        let content: serde_json::Value = serde_json::from_str(&file_content)
+            .map_err(|_| NvmError::FileError("failed to parse file: ".to_string() + filename))?;
+        Self::from_parsed_content(content, blockname)
+    }
+}
+
+impl FlashBlock<serde_yaml::Mapping> {
+    pub fn new(filename: &str, blockname: &str) -> Result<Self, NvmError> {
+        let file_content = fs::read_to_string(filename)
+            .map_err(|_| NvmError::FileError("failed to open file: ".to_string() + filename))?;
+        let content: serde_yaml::Value = serde_yaml::from_str(&file_content)
             .map_err(|_| NvmError::FileError("failed to parse file: ".to_string() + filename))?;
         Self::from_parsed_content(content, blockname)
     }
