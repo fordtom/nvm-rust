@@ -6,6 +6,8 @@ use crate::schema::*;
 
 pub struct DataSheet {
     names: Vec<String>,
+    // Lowercased name -> index for case-insensitive lookup from layout to Excel
+    names_lower_to_index: HashMap<String, usize>,
     default_values: Vec<Data>,
     debug_values: Option<Vec<Data>>,
     variant_values: Option<Vec<Data>>,
@@ -36,13 +38,21 @@ impl DataSheet {
             .position(|cell| Self::cell_eq_ascii(cell, "Name"))
             .ok_or(NvmError::ColumnNotFound("Name".to_string()))?;
 
+        // Allow a few aliases for the default column, case-insensitive
+        let default_aliases = ["Default", "Defaults", "Generic"];
         let default_index = headers
             .iter()
-            .position(|cell| Self::cell_eq_ascii(cell, "Default"))
+            .position(|cell| default_aliases.iter().any(|opt| Self::cell_eq_ascii(cell, opt)))
             .ok_or(NvmError::ColumnNotFound("Default".to_string()))?;
 
         let mut names: Vec<String> = Vec::with_capacity(data_rows);
         names.extend(rows.iter().skip(1).map(|row| row[name_index].to_string()));
+
+        // Build a lowercase name -> index map for case-insensitive lookups
+        let mut names_lower_to_index: HashMap<String, usize> = HashMap::with_capacity(names.len());
+        for (idx, nm) in names.iter().enumerate() {
+            names_lower_to_index.insert(nm.trim().to_ascii_lowercase(), idx);
+        }
 
         let mut default_values: Vec<Data> = Vec::with_capacity(data_rows);
         default_values.extend(rows.iter().skip(1).map(|row| row[default_index].clone()));
@@ -61,10 +71,10 @@ impl DataSheet {
         }
 
         let mut variant_values: Option<Vec<Data>> = None;
-        if let &Some(ref name) = variant {
+        if let Some(name) = variant {
             let variant_index = headers
                 .iter()
-                .position(|cell| cell.to_string() == *name)
+                .position(|cell| Self::cell_eq_ascii(cell, name))
                 .ok_or(NvmError::ColumnNotFound(name.to_string()))?;
 
             let mut variant_vec: Vec<Data> = Vec::with_capacity(data_rows);
@@ -83,6 +93,7 @@ impl DataSheet {
 
         Ok(Self {
             names,
+            names_lower_to_index,
             default_values,
             debug_values,
             variant_values,
@@ -112,7 +123,7 @@ impl DataSheet {
             let mut out = Vec::new();
 
             for row in sheet.rows().skip(1) {
-                match row.get(0) {
+                match row.first() {
                     Some(cell) if !Self::cell_is_empty(cell) => {
                         let v = match cell {
                             Data::Int(i) => DataValue::I64(*i),
@@ -144,7 +155,7 @@ impl DataSheet {
         };
 
         let sheet = self.sheets.get(cell_string).ok_or_else(|| {
-            NvmError::RetrievalError("Sheet not found: ".to_string() + &cell_string)
+            NvmError::RetrievalError("Sheet not found: ".to_string() + cell_string)
         })?;
 
         let convert = |cell: &Data| -> Result<DataValue, NvmError> {
@@ -171,7 +182,7 @@ impl DataSheet {
         let mut out = Vec::new();
 
         'outer: for row in rows {
-            if row.get(0).map_or(true, |c| Self::cell_is_empty(c)) {
+            if row.first().is_none_or(Self::cell_is_empty) {
                 break;
             }
 
@@ -192,34 +203,24 @@ impl DataSheet {
     }
 
     fn retrieve_cell(&self, name: &str) -> Result<&Data, NvmError> {
-        let index = self
-            .names
-            .iter()
-            .position(|n| n == name)
+        let key = name.trim().to_ascii_lowercase();
+        let index = *self
+            .names_lower_to_index
+            .get(&key)
             .ok_or(NvmError::RetrievalError(
                 "index not found for ".to_string() + name,
             ))?;
 
-        if let Some(debug_values) = &self.debug_values {
-            if let Some(debug) = debug_values.get(index) {
-                if !Self::cell_is_empty(debug) {
-                    return Ok(debug);
-                }
-            }
-        }
-
-        if let Some(variant_values) = &self.variant_values {
-            if let Some(variant) = variant_values.get(index) {
-                if !Self::cell_is_empty(variant) {
-                    return Ok(variant);
-                }
-            }
-        }
-
-        if let Some(default) = self.default_values.get(index) {
-            if !Self::cell_is_empty(default) {
-                return Ok(default);
-            }
+        if let Some(v) = [
+            self.debug_values.as_ref().and_then(|v| v.get(index)),
+            self.variant_values.as_ref().and_then(|v| v.get(index)),
+            self.default_values.get(index),
+        ]
+        .iter()
+        .flatten()
+        .find(|d| !Self::cell_is_empty(d))
+        {
+            return Ok(v);
         }
 
         Err(NvmError::RetrievalError(
